@@ -23,7 +23,7 @@ cd loki-monitoring
 
 ### 2. Create Docker Compose File
 ```bash
-tee sudo docker-compose.yml > /dev/null <<'EOF'
+tee docker-compose.yml > /dev/null <<'EOF'
 version: '3.8'
 
 services:
@@ -198,7 +198,6 @@ sudo tee /etc/audit/rules.d/file-changes.rules > /dev/null <<'EOF'
 -w /etc -p wa -k config-changes
 -w /home -p wa -k home-changes
 -w /var/www -p wa -k web-changes
-# -w /opt -p wa -k opt-changes
 -w /usr/local -p wa -k local-changes
 -w /root -p wa -k root-changes
 
@@ -219,35 +218,77 @@ sudo systemctl restart auditd
 sudo systemctl enable auditd
 ```
 
-#### Create File Change Logger Script
+#### Create File Change Logger Script (Improved)
 ```bash
 sudo tee /opt/promtail/file-monitor.sh > /dev/null <<'EOF'
 #!/bin/bash
 
 LOG_FILE="/var/log/file-changes/changes.log"
+ERROR_LOG="/var/log/file-changes/error.log"
+PID_FILE="/var/run/file-monitor.pid"
 
-# Ensure log directory exists
+# Create log directory
 mkdir -p /var/log/file-changes
 
-# Monitor directories with inotify
+# List of directories to monitor (excluding /opt to avoid promtail noise)
+DIRS_TO_MONITOR=("/etc" "/home" "/usr/local" "/root")
+
+# Check which directories exist
+EXISTING_DIRS=()
+for dir in "${DIRS_TO_MONITOR[@]}"; do
+    if [ -d "$dir" ]; then
+        EXISTING_DIRS+=("$dir")
+        echo "$(date) - Will monitor: $dir" >> "$ERROR_LOG"
+    else
+        echo "$(date) - Skipping non-existent directory: $dir" >> "$ERROR_LOG"
+    fi
+done
+
+# Create /var/www if web server exists
+if command -v nginx >/dev/null 2>&1 || command -v apache2 >/dev/null 2>&1; then
+    mkdir -p /var/www
+    EXISTING_DIRS+=("/var/www")
+fi
+
+echo "$(date) - Starting file monitoring for: ${EXISTING_DIRS[*]}" >> "$ERROR_LOG"
+echo "$(date) - EXCLUDING: /opt/promtail, cache dirs, temp dirs" >> "$ERROR_LOG"
+
+# Start inotify with comprehensive exclusions
 inotifywait -m -r -e modify,create,delete,move \
-    /etc /home /var/www /opt /usr/local /root \
+    "${EXISTING_DIRS[@]}" \
     --format '%T [%w%f] %e' \
     --timefmt '%Y-%m-%d %H:%M:%S' \
-    --exclude '/(proc|sys|dev|tmp)/' >> "$LOG_FILE" 2>/dev/null &
+    --exclude '/(\.(cache|local/share/Trash|git|svn)|tmp|temp|promtail)/' \
+    >> "$LOG_FILE" 2>> "$ERROR_LOG" &
 
-echo "File monitoring started. PID: $!"
+INOTIFY_PID=$!
+echo $INOTIFY_PID > "$PID_FILE"
+echo "$(date) - File monitoring started. PID: $INOTIFY_PID" >> "$ERROR_LOG"
+
+# Wait for the process
+wait $INOTIFY_PID
 EOF
 
 sudo chmod +x /opt/promtail/file-monitor.sh
 ```
 
-### 4. Create Promtail Configuration
+### 4. Create Promtail Configuration (Simple Version)
 **Replace `YOUR_MONITORING_SERVER_IP` with your actual monitoring server IP:**
 
 ```bash
 # Set your monitoring server IP
 LOKI_SERVER_IP="YOUR_MONITORING_SERVER_IP"
+
+# Get server identification - uses hostname or you can manually set SERVER_NAME
+HOSTNAME=$(hostname)
+SERVER_IP=$(hostname -I | awk '{print $1}')
+PUBLIC_IP=$(curl -s ipinfo.io/ip 2>/dev/null || echo "unknown")
+
+# Use public IP as the main identifier, fallback to hostname
+SERVER_IDENTIFIER="${PUBLIC_IP}"
+if [ "$PUBLIC_IP" = "unknown" ]; then
+    SERVER_IDENTIFIER="${HOSTNAME}"
+fi
 
 sudo tee /opt/promtail/config/promtail-config.yml > /dev/null <<EOF
 server:
@@ -268,14 +309,11 @@ scrape_configs:
           - localhost
         labels:
           job: ssh-logs
-          host: \$(hostname)
+          server: ${SERVER_IDENTIFIER}
+          hostname: ${HOSTNAME}
+          private_ip: ${SERVER_IP}
+          public_ip: ${PUBLIC_IP}
           __path__: /var/log/auth.log
-    pipeline_stages:
-      - match:
-          selector: '{job="ssh-logs"}'
-          stages:
-            - regex:
-                expression: '.*(sshd|sudo|su).*'
 
   # System Logs
   - job_name: system-logs
@@ -284,7 +322,10 @@ scrape_configs:
           - localhost
         labels:
           job: system-logs
-          host: \$(hostname)
+          server: ${SERVER_IDENTIFIER}
+          hostname: ${HOSTNAME}
+          private_ip: ${SERVER_IP}
+          public_ip: ${PUBLIC_IP}
           __path__: /var/log/syslog
 
   # Security Logs
@@ -294,14 +335,11 @@ scrape_configs:
           - localhost
         labels:
           job: security-logs
-          host: \$(hostname)
+          server: ${SERVER_IDENTIFIER}
+          hostname: ${HOSTNAME}
+          private_ip: ${SERVER_IP}
+          public_ip: ${PUBLIC_IP}
           __path__: /var/log/secure
-    pipeline_stages:
-      - match:
-          selector: '{job="security-logs"}'
-          stages:
-            - regex:
-                expression: '.*(authentication|login|session).*'
 
   # Audit Logs (File Changes)
   - job_name: audit-logs
@@ -310,14 +348,11 @@ scrape_configs:
           - localhost
         labels:
           job: audit-logs
-          host: \$(hostname)
+          server: ${SERVER_IDENTIFIER}
+          hostname: ${HOSTNAME}
+          private_ip: ${SERVER_IP}
+          public_ip: ${PUBLIC_IP}
           __path__: /var/log/audit/audit.log
-    pipeline_stages:
-      - match:
-          selector: '{job="audit-logs"}'
-          stages:
-            - regex:
-                expression: '.*type=(SYSCALL|PATH).*'
 
   # Custom File Change Logs
   - job_name: file-changes
@@ -326,7 +361,10 @@ scrape_configs:
           - localhost
         labels:
           job: file-changes
-          host: \$(hostname)
+          server: ${SERVER_IDENTIFIER}
+          hostname: ${HOSTNAME}
+          private_ip: ${SERVER_IP}
+          public_ip: ${PUBLIC_IP}
           __path__: /var/log/file-changes/changes.log
 
   # Kernel Logs
@@ -336,9 +374,31 @@ scrape_configs:
           - localhost
         labels:
           job: kernel-logs
-          host: \$(hostname)
+          server: ${SERVER_IDENTIFIER}
+          hostname: ${HOSTNAME}
+          private_ip: ${SERVER_IP}
+          public_ip: ${PUBLIC_IP}
           __path__: /var/log/kern.log
 EOF
+
+echo "✅ Promtail configured for server: $SERVER_IDENTIFIER"
+```
+
+### Alternative: Manual Server Naming
+If you prefer to manually name your servers (server1, server2, etc.), create this override:
+
+```bash
+# OPTIONAL: Manual server naming
+# Create this file on each server with a unique name:
+# echo "server1" | sudo tee /etc/server-name
+# echo "server2" | sudo tee /etc/server-name  
+# echo "server3" | sudo tee /etc/server-name
+
+# Check for manual server name override
+if [ -f "/etc/server-name" ]; then
+    SERVER_IDENTIFIER=$(cat /etc/server-name)
+    echo "✅ Using manual server name: $SERVER_IDENTIFIER"
+fi
 ```
 
 ### 5. Create Systemd Services
@@ -373,11 +433,13 @@ Description=File Change Monitor
 After=network.target
 
 [Service]
-Type=forking
+Type=simple
 User=root
 ExecStart=/opt/promtail/file-monitor.sh
-Restart=always
-RestartSec=10
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
@@ -413,6 +475,9 @@ curl -G -s "http://localhost:3100/ready"
 
 # Check if logs are being received
 curl -G -s "http://localhost:3100/loki/api/v1/labels"
+
+# Check which servers are sending logs
+curl -G -s "http://localhost:3100/loki/api/v1/label/instance/values" | jq
 
 # View recent logs
 curl -G -s "http://localhost:3100/loki/api/v1/query" \
@@ -450,7 +515,7 @@ ssh -i /tmp/test_key localhost
 
 # Generate file change logs
 sudo touch /etc/test-config-change
-sudo mkdir /opt/test-directory
+sudo mkdir /home/test-directory
 echo "test content" | sudo tee /home/test-file.txt
 ```
 
@@ -463,26 +528,46 @@ echo "test content" | sudo tee /home/test-file.txt
 - Username: `admin`
 - Password: `admin123`
 
-### Create Basic Queries
-1. **SSH Failed Logins:**
+### Simple Multi-Server Queries
+
+1. **SSH Failed Logins by Server:**
    ```
    {job="ssh-logs"} |= "Failed password"
    ```
 
-2. **Successful SSH Logins:**
+2. **Successful SSH Logins from Specific Server:**
    ```
-   {job="ssh-logs"} |= "Accepted password"
-   ```
-
-3. **File Changes:**
-   ```
-   {job="audit-logs"} |= "SYSCALL" |= "openat"
+   {job="ssh-logs", server="192.168.1.100"} |= "Accepted password"
    ```
 
-4. **System Errors:**
+3. **File Changes on Specific Server:**
+   ```
+   {job="file-changes", server="192.168.1.100"}
+   ```
+
+4. **System Errors Across All Servers:**
    ```
    {job="system-logs"} |= "error" or "Error" or "ERROR"
    ```
+
+5. **All Activity from Specific Server:**
+   ```
+   {server="192.168.1.100"}
+   ```
+
+6. **SSH Activity from Multiple Servers:**
+   ```
+   {job="ssh-logs", server=~"192.168.1.100|192.168.1.101"}
+   ```
+
+### Create Dashboard Variables
+1. **Server Variable:**
+   - Query: `label_values(server)`
+   - Multi-value: ✅
+
+2. **Log Type Variable:**
+   - Query: `label_values(job)`
+   - Multi-value: ✅
 
 ---
 
@@ -567,6 +652,16 @@ sudo logrotate -f /etc/logrotate.d/rsyslog
    sudo nano /etc/logrotate.d/audit
    ```
 
+5. **Can't see all servers in Grafana:**
+   ```bash
+   # Check which servers are reporting
+   curl -G -s "http://YOUR_LOKI_SERVER:3100/loki/api/v1/label/server/values" | jq
+   
+   # Check server-specific logs
+   curl -G -s "http://YOUR_LOKI_SERVER:3100/loki/api/v1/query" \
+     --data-urlencode 'query={server="192.168.1.100"}' | jq
+   ```
+
 ### Log Locations
 - **SSH Logs:** `/var/log/auth.log` (Ubuntu/Debian), `/var/log/secure` (CentOS/RHEL)
 - **System Logs:** `/var/log/syslog`
@@ -599,7 +694,7 @@ sudo logrotate -f /etc/logrotate.d/rsyslog
    # Use TLS encryption for log shipping
    ```
 
-4. **Loki Dashborad:-Enter one of these popular Loki dashboard IDs:**
+4. **Loki Dashboard - Enter one of these popular Loki dashboard IDs:**
    ```bash
     # 13639 - Loki Dashboard Quick Search
     # 12019 - Loki Logs Dashboard
@@ -607,5 +702,4 @@ sudo logrotate -f /etc/logrotate.d/rsyslog
     # 15141 - Loki Operational Dashboard
    ```
 
-
-This setup provides comprehensive monitoring of SSH activities and file changes across your infrastructure with centralized logging through Loki and visualization through Grafana.
+This setup provides comprehensive monitoring of SSH activities and file changes across your infrastructure with centralized logging through Loki and visualization through Grafana. Each server will now be uniquely identified with proper labels for easy filtering and analysis.
