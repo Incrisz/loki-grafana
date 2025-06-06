@@ -21,8 +21,8 @@ cd loki-monitoring
 ```
 
 ### 2. Create Docker Compose File
-Create `docker-compose.yml`:
-```yaml
+```bash
+tee docker-compose.yml > /dev/null <<'EOF'
 version: '3.8'
 
 services:
@@ -59,11 +59,12 @@ services:
 networks:
   loki-network:
     driver: bridge
+EOF
 ```
 
 ### 3. Create Loki Configuration
-Create `config/loki-config.yaml`:
-```yaml
+```bash
+tee config/loki-config.yaml > /dev/null <<'EOF'
 auth_enabled: false
 
 server:
@@ -110,11 +111,12 @@ limits_config:
   ingestion_burst_size_mb: 32
   per_stream_rate_limit: 3MB
   per_stream_rate_limit_burst: 5MB
+EOF
 ```
 
 ### 4. Create Grafana Datasource Configuration
-Create `config/grafana-datasources.yml`:
-```yaml
+```bash
+tee config/grafana-datasources.yml > /dev/null <<'EOF'
 apiVersion: 1
 
 datasources:
@@ -124,6 +126,7 @@ datasources:
     url: http://loki:3100
     isDefault: true
     editable: true
+EOF
 ```
 
 ### 5. Start the Stack
