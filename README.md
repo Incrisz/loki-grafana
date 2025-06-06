@@ -8,7 +8,7 @@ Complete setup guide for centralized log monitoring using Loki with Docker on th
 ```bash
 # Install Docker and Docker Compose
 sudo apt update
-sudo apt install -y docker.io sudo docker-compose
+sudo apt install -y docker.io docker-compose
 sudo systemctl enable docker
 sudo systemctl start docker
 sudo usermod -aG docker $USER
@@ -16,6 +16,7 @@ sudo usermod -aG docker $USER
 
 ### 1. Create Project Structure
 ```bash
+sudo mkdir -p /var/www
 mkdir -p loki-monitoring/{config,data/loki,data/grafana}
 cd loki-monitoring
 ```
@@ -131,7 +132,13 @@ EOF
 
 ### 5. Start the Stack
 ```bash
-# Set permissions
+# Create the required directory structure with proper permissions
+sudo mkdir -p data/loki/{chunks,rules,index}
+
+# Set ownership to the loki user (UID 10001 in the container)
+sudo chown -R 10001:10001 data/loki
+
+# Set permissions for Grafana
 sudo chown -R 472:472 data/grafana
 sudo chmod -R 755 data/
 
@@ -191,7 +198,7 @@ sudo tee /etc/audit/rules.d/file-changes.rules > /dev/null <<'EOF'
 -w /etc -p wa -k config-changes
 -w /home -p wa -k home-changes
 -w /var/www -p wa -k web-changes
--w /opt -p wa -k opt-changes
+# -w /opt -p wa -k opt-changes
 -w /usr/local -p wa -k local-changes
 -w /root -p wa -k root-changes
 
@@ -591,5 +598,14 @@ sudo logrotate -f /etc/logrotate.d/rsyslog
    # Enable authentication in Loki for production
    # Use TLS encryption for log shipping
    ```
+
+4. **Loki Dashborad:-Enter one of these popular Loki dashboard IDs:**
+   ```bash
+    # 13639 - Loki Dashboard Quick Search
+    # 12019 - Loki Logs Dashboard
+    # 14055 - Loki Stack Monitoring
+    # 15141 - Loki Operational Dashboard
+   ```
+
 
 This setup provides comprehensive monitoring of SSH activities and file changes across your infrastructure with centralized logging through Loki and visualization through Grafana.
