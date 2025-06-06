@@ -23,7 +23,7 @@ cd loki-monitoring
 
 ### 2. Create Docker Compose File
 ```bash
-tee sudo docker-compose.yml > /dev/null <<'EOF'
+tee docker-compose.yml > /dev/null <<'EOF'
 version: '3.8'
 
 services:
@@ -198,7 +198,6 @@ sudo tee /etc/audit/rules.d/file-changes.rules > /dev/null <<'EOF'
 -w /etc -p wa -k config-changes
 -w /home -p wa -k home-changes
 -w /var/www -p wa -k web-changes
-# -w /opt -p wa -k opt-changes
 -w /usr/local -p wa -k local-changes
 -w /root -p wa -k root-changes
 
@@ -219,127 +218,94 @@ sudo systemctl restart auditd
 sudo systemctl enable auditd
 ```
 
-#### Create File Change Logger Script
+#### Create File Change Logger Script (Improved)
 ```bash
 sudo tee /opt/promtail/file-monitor.sh > /dev/null <<'EOF'
 #!/bin/bash
 
 LOG_FILE="/var/log/file-changes/changes.log"
+ERROR_LOG="/var/log/file-changes/error.log"
+PID_FILE="/var/run/file-monitor.pid"
 
-# Ensure log directory exists
+# Create log directory
 mkdir -p /var/log/file-changes
 
-# Monitor directories with inotify
+# List of directories to monitor (excluding /opt to avoid promtail noise)
+DIRS_TO_MONITOR=("/etc" "/home" "/usr/local" "/root")
+
+# Check which directories exist
+EXISTING_DIRS=()
+for dir in "${DIRS_TO_MONITOR[@]}"; do
+    if [ -d "$dir" ]; then
+        EXISTING_DIRS+=("$dir")
+        echo "$(date) - Will monitor: $dir" >> "$ERROR_LOG"
+    else
+        echo "$(date) - Skipping non-existent directory: $dir" >> "$ERROR_LOG"
+    fi
+done
+
+# Create /var/www if web server exists
+if command -v nginx >/dev/null 2>&1 || command -v apache2 >/dev/null 2>&1; then
+    mkdir -p /var/www
+    EXISTING_DIRS+=("/var/www")
+fi
+
+echo "$(date) - Starting file monitoring for: ${EXISTING_DIRS[*]}" >> "$ERROR_LOG"
+echo "$(date) - EXCLUDING: /opt/promtail, cache dirs, temp dirs" >> "$ERROR_LOG"
+
+# Start inotify with comprehensive exclusions
 inotifywait -m -r -e modify,create,delete,move \
-    /etc /home /var/www /opt /usr/local /root \
+    "${EXISTING_DIRS[@]}" \
     --format '%T [%w%f] %e' \
     --timefmt '%Y-%m-%d %H:%M:%S' \
-    --exclude '/(proc|sys|dev|tmp)/' >> "$LOG_FILE" 2>/dev/null &
+    --exclude '/(\.(cache|local/share/Trash|git|svn)|tmp|temp|promtail)/' \
+    >> "$LOG_FILE" 2>> "$ERROR_LOG" &
 
-echo "File monitoring started. PID: $!"
+INOTIFY_PID=$!
+echo $INOTIFY_PID > "$PID_FILE"
+echo "$(date) - File monitoring started. PID: $INOTIFY_PID" >> "$ERROR_LOG"
+
+# Wait for the process
+wait $INOTIFY_PID
 EOF
 
 sudo chmod +x /opt/promtail/file-monitor.sh
 ```
 
-### 4. Create Promtail Configuration
+### 4. Create Promtail Configuration (Auto-Numbering)
 **Replace `YOUR_MONITORING_SERVER_IP` with your actual monitoring server IP:**
 
 ```bash
 # Set your monitoring server IP
 LOKI_SERVER_IP="YOUR_MONITORING_SERVER_IP"
 
-sudo tee /opt/promtail/config/promtail-config.yml > /dev/null <<EOF
-server:
-  http_listen_port: 9080
-  grpc_listen_port: 0
+# Get server details
+HOSTNAME=$(hostname)
+SERVER_IP=$(hostname -I | awk '{print $1}')
+PUBLIC_IP=$(curl -s ipinfo.io/ip 2>/dev/null || echo "unknown")
 
-positions:
-  filename: /opt/promtail/data/positions.yaml
-
-clients:
-  - url: http://${LOKI_SERVER_IP}:3100/loki/api/v1/push
-
-scrape_configs:
-  # SSH Authentication Logs
-  - job_name: ssh-logs
-    static_configs:
-      - targets:
-          - localhost
-        labels:
-          job: ssh-logs
-          host: \$(hostname)
-          __path__: /var/log/auth.log
-    pipeline_stages:
-      - match:
-          selector: '{job="ssh-logs"}'
-          stages:
-            - regex:
-                expression: '.*(sshd|sudo|su).*'
-
-  # System Logs
-  - job_name: system-logs
-    static_configs:
-      - targets:
-          - localhost
-        labels:
-          job: system-logs
-          host: \$(hostname)
-          __path__: /var/log/syslog
-
-  # Security Logs
-  - job_name: security-logs
-    static_configs:
-      - targets:
-          - localhost
-        labels:
-          job: security-logs
-          host: \$(hostname)
-          __path__: /var/log/secure
-    pipeline_stages:
-      - match:
-          selector: '{job="security-logs"}'
-          stages:
-            - regex:
-                expression: '.*(authentication|login|session).*'
-
-  # Audit Logs (File Changes)
-  - job_name: audit-logs
-    static_configs:
-      - targets:
-          - localhost
-        labels:
-          job: audit-logs
-          host: \$(hostname)
-          __path__: /var/log/audit/audit.log
-    pipeline_stages:
-      - match:
-          selector: '{job="audit-logs"}'
-          stages:
-            - regex:
-                expression: '.*type=(SYSCALL|PATH).*'
-
-  # Custom File Change Logs
-  - job_name: file-changes
-    static_configs:
-      - targets:
-          - localhost
-        labels:
-          job: file-changes
-          host: \$(hostname)
-          __path__: /var/log/file-changes/changes.log
-
-  # Kernel Logs
-  - job_name: kernel-logs
-    static_configs:
-      - targets:
-          - localhost
-        labels:
-          job: kernel-logs
-          host: \$(hostname)
-          __path__: /var/log/kern.log
-EOF
-```
+# Auto-assign server number
+assign_server_number() {
+    local server_file="/etc/loki-server-number"
+    
+    # Check if this server already has a number assigned
+    if [ -f "$server_file" ]; then
+        cat "$server_file"
+        return
+    fi
+    
+    echo "🔍 Auto-assigning server number..."
+    
+    # Try to get existing server numbers from Loki
+    local existing_servers=""
+    if command -v curl >/dev/null 2>&1; then
+        existing_servers=$(curl -s -G "http://${LOKI_SERVER_IP}:3100/loki/api/v1/label/server/values" 2>/dev/null | grep -o 'server[0-9]*' | sort -V | tail -1)
+    fi
+    
+    # Extract the highest number and add 1
+    local next_number=1
+    if [ -n "$existing_servers" ]; then
+        local last_number=$(echo "$existing_servers" | grep -o '[0-9]*
 
 ### 5. Create Systemd Services
 
@@ -373,11 +339,13 @@ Description=File Change Monitor
 After=network.target
 
 [Service]
-Type=forking
+Type=simple
 User=root
 ExecStart=/opt/promtail/file-monitor.sh
-Restart=always
-RestartSec=10
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
@@ -413,6 +381,9 @@ curl -G -s "http://localhost:3100/ready"
 
 # Check if logs are being received
 curl -G -s "http://localhost:3100/loki/api/v1/labels"
+
+# Check which servers are sending logs
+curl -G -s "http://localhost:3100/loki/api/v1/label/instance/values" | jq
 
 # View recent logs
 curl -G -s "http://localhost:3100/loki/api/v1/query" \
@@ -450,7 +421,7 @@ ssh -i /tmp/test_key localhost
 
 # Generate file change logs
 sudo touch /etc/test-config-change
-sudo mkdir /opt/test-directory
+sudo mkdir /home/test-directory
 echo "test content" | sudo tee /home/test-file.txt
 ```
 
@@ -463,26 +434,46 @@ echo "test content" | sudo tee /home/test-file.txt
 - Username: `admin`
 - Password: `admin123`
 
-### Create Basic Queries
-1. **SSH Failed Logins:**
+### Simple Multi-Server Queries
+
+1. **SSH Failed Logins by Server:**
    ```
    {job="ssh-logs"} |= "Failed password"
    ```
 
-2. **Successful SSH Logins:**
+2. **Successful SSH Logins from Specific Server:**
    ```
-   {job="ssh-logs"} |= "Accepted password"
-   ```
-
-3. **File Changes:**
-   ```
-   {job="audit-logs"} |= "SYSCALL" |= "openat"
+   {job="ssh-logs", server="192.168.1.100"} |= "Accepted password"
    ```
 
-4. **System Errors:**
+3. **File Changes on Specific Server:**
+   ```
+   {job="file-changes", server="192.168.1.100"}
+   ```
+
+4. **System Errors Across All Servers:**
    ```
    {job="system-logs"} |= "error" or "Error" or "ERROR"
    ```
+
+5. **All Activity from Specific Server:**
+   ```
+   {server="192.168.1.100"}
+   ```
+
+6. **SSH Activity from Multiple Servers:**
+   ```
+   {job="ssh-logs", server=~"192.168.1.100|192.168.1.101"}
+   ```
+
+### Create Dashboard Variables
+1. **Server Variable:**
+   - Query: `label_values(server)`
+   - Multi-value: ✅
+
+2. **Log Type Variable:**
+   - Query: `label_values(job)`
+   - Multi-value: ✅
 
 ---
 
@@ -567,6 +558,16 @@ sudo logrotate -f /etc/logrotate.d/rsyslog
    sudo nano /etc/logrotate.d/audit
    ```
 
+5. **Can't see all servers in Grafana:**
+   ```bash
+   # Check which servers are reporting
+   curl -G -s "http://YOUR_LOKI_SERVER:3100/loki/api/v1/label/server/values" | jq
+   
+   # Check server-specific logs
+   curl -G -s "http://YOUR_LOKI_SERVER:3100/loki/api/v1/query" \
+     --data-urlencode 'query={server="192.168.1.100"}' | jq
+   ```
+
 ### Log Locations
 - **SSH Logs:** `/var/log/auth.log` (Ubuntu/Debian), `/var/log/secure` (CentOS/RHEL)
 - **System Logs:** `/var/log/syslog`
@@ -599,7 +600,7 @@ sudo logrotate -f /etc/logrotate.d/rsyslog
    # Use TLS encryption for log shipping
    ```
 
-4. **Loki Dashborad:-Enter one of these popular Loki dashboard IDs:**
+4. **Loki Dashboard - Enter one of these popular Loki dashboard IDs:**
    ```bash
     # 13639 - Loki Dashboard Quick Search
     # 12019 - Loki Logs Dashboard
@@ -607,5 +608,426 @@ sudo logrotate -f /etc/logrotate.d/rsyslog
     # 15141 - Loki Operational Dashboard
    ```
 
+This setup provides comprehensive monitoring of SSH activities and file changes across your infrastructure with centralized logging through Loki and visualization through Grafana. Each server will now be uniquely identified with proper labels for easy filtering and analysis.)
+        if [ -n "$last_number" ] && [ "$last_number" -gt 0 ]; then
+            next_number=$((last_number + 1))
+        fi
+    fi
+    
+    local server_name="server${next_number}"
+    echo "$server_name" | sudo tee "$server_file" >/dev/null
+    echo "$server_name"
+}
 
-This setup provides comprehensive monitoring of SSH activities and file changes across your infrastructure with centralized logging through Loki and visualization through Grafana.
+# Get or assign server identifier
+SERVER_IDENTIFIER=$(assign_server_number)
+
+sudo tee /opt/promtail/config/promtail-config.yml > /dev/null <<EOF
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /opt/promtail/data/positions.yaml
+
+clients:
+  - url: http://${LOKI_SERVER_IP}:3100/loki/api/v1/push
+
+scrape_configs:
+  # SSH Authentication Logs
+  - job_name: ssh-logs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: ssh-logs
+          server: ${SERVER_IDENTIFIER}
+          hostname: ${HOSTNAME}
+          private_ip: ${SERVER_IP}
+          public_ip: ${PUBLIC_IP}
+          __path__: /var/log/auth.log
+
+  # System Logs
+  - job_name: system-logs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: system-logs
+          server: ${SERVER_IDENTIFIER}
+          hostname: ${HOSTNAME}
+          private_ip: ${SERVER_IP}
+          public_ip: ${PUBLIC_IP}
+          __path__: /var/log/syslog
+
+  # Security Logs
+  - job_name: security-logs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: security-logs
+          server: ${SERVER_IDENTIFIER}
+          hostname: ${HOSTNAME}
+          private_ip: ${SERVER_IP}
+          public_ip: ${PUBLIC_IP}
+          __path__: /var/log/secure
+
+  # Audit Logs (File Changes)
+  - job_name: audit-logs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: audit-logs
+          server: ${SERVER_IDENTIFIER}
+          hostname: ${HOSTNAME}
+          private_ip: ${SERVER_IP}
+          public_ip: ${PUBLIC_IP}
+          __path__: /var/log/audit/audit.log
+
+  # Custom File Change Logs
+  - job_name: file-changes
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: file-changes
+          server: ${SERVER_IDENTIFIER}
+          hostname: ${HOSTNAME}
+          private_ip: ${SERVER_IP}
+          public_ip: ${PUBLIC_IP}
+          __path__: /var/log/file-changes/changes.log
+
+  # Kernel Logs
+  - job_name: kernel-logs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: kernel-logs
+          server: ${SERVER_IDENTIFIER}
+          hostname: ${HOSTNAME}
+          private_ip: ${SERVER_IP}
+          public_ip: ${PUBLIC_IP}
+          __path__: /var/log/kern.log
+EOF
+
+echo "✅ Promtail configured for: $SERVER_IDENTIFIER"
+echo "✅ Server number saved to: /etc/loki-server-number"
+```
+
+### Manual Override (Optional)
+If you want to manually assign a specific number to any server:
+
+```bash
+# Manually assign server numbers before running the script:
+echo "server1" | sudo tee /etc/loki-server-number
+echo "server2" | sudo tee /etc/loki-server-number
+echo "server10" | sudo tee /etc/loki-server-number  # Skip numbers if needed
+
+# Then run the main script - it will use the manual assignment
+```
+
+### 5. Create Systemd Services
+
+#### Promtail Service
+```bash
+sudo tee /etc/systemd/system/promtail.service > /dev/null <<'EOF'
+[Unit]
+Description=Promtail Log Collector
+After=network.target auditd.service
+Wants=auditd.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/promtail -config.file=/opt/promtail/config/promtail-config.yml
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+#### File Monitor Service
+```bash
+sudo tee /etc/systemd/system/file-monitor.service > /dev/null <<'EOF'
+[Unit]
+Description=File Change Monitor
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/promtail/file-monitor.sh
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+### 6. Start Services
+```bash
+# Reload systemd
+sudo systemctl daemon-reload
+
+# Enable and start services
+sudo systemctl enable promtail file-monitor
+sudo systemctl start promtail file-monitor
+
+# Check service status
+sudo systemctl status promtail
+sudo systemctl status file-monitor
+sudo systemctl status auditd
+```
+
+---
+
+## Verification and Testing
+
+### Central Server Verification
+```bash
+# Check Docker containers
+sudo docker-compose ps
+
+# Check Loki API
+curl -G -s "http://localhost:3100/ready"
+
+# Check if logs are being received
+curl -G -s "http://localhost:3100/loki/api/v1/labels"
+
+# Check which servers are sending logs
+curl -G -s "http://localhost:3100/loki/api/v1/label/instance/values" | jq
+
+# View recent logs
+curl -G -s "http://localhost:3100/loki/api/v1/query" \
+  --data-urlencode 'query={job=~".*"}' \
+  --data-urlencode 'limit=10'
+```
+
+### Agent Server Verification
+```bash
+# Check Promtail status
+sudo systemctl status promtail
+sudo journalctl -u promtail -f --no-pager
+
+# Check file monitoring
+sudo systemctl status file-monitor
+ls -la /var/log/file-changes/
+
+# Test SSH logging (generate some SSH activity)
+ssh localhost
+sudo tail -f /var/log/auth.log
+
+# Test file changes (create a test file)
+sudo touch /etc/test-file
+sudo ausearch -k config-changes | tail -5
+
+# Check audit logs
+sudo ausearch -ts recent | head -10
+```
+
+### Test Log Generation
+```bash
+# Generate SSH test logs
+ssh-keygen -t rsa -f /tmp/test_key -N ""
+ssh -i /tmp/test_key localhost
+
+# Generate file change logs
+sudo touch /etc/test-config-change
+sudo mkdir /home/test-directory
+echo "test content" | sudo tee /home/test-file.txt
+```
+
+---
+
+## Grafana Dashboard Setup
+
+### Access Grafana
+- URL: `http://YOUR_MONITORING_SERVER_IP:3000`
+- Username: `admin`
+- Password: `admin123`
+
+### Simple Multi-Server Queries
+
+1. **SSH Failed Logins by Server:**
+   ```
+   {job="ssh-logs"} |= "Failed password"
+   ```
+
+2. **Successful SSH Logins from Specific Server:**
+   ```
+   {job="ssh-logs", server="192.168.1.100"} |= "Accepted password"
+   ```
+
+3. **File Changes on Specific Server:**
+   ```
+   {job="file-changes", server="192.168.1.100"}
+   ```
+
+4. **System Errors Across All Servers:**
+   ```
+   {job="system-logs"} |= "error" or "Error" or "ERROR"
+   ```
+
+5. **All Activity from Specific Server:**
+   ```
+   {server="192.168.1.100"}
+   ```
+
+6. **SSH Activity from Multiple Servers:**
+   ```
+   {job="ssh-logs", server=~"192.168.1.100|192.168.1.101"}
+   ```
+
+### Create Dashboard Variables
+1. **Server Variable:**
+   - Query: `label_values(server)`
+   - Multi-value: ✅
+
+2. **Log Type Variable:**
+   - Query: `label_values(job)`
+   - Multi-value: ✅
+
+---
+
+## Maintenance Commands
+
+### Central Server (Docker)
+```bash
+# View logs
+sudo docker-compose logs -f loki
+sudo docker-compose logs -f grafana
+
+# Restart services
+sudo docker-compose restart loki
+sudo docker-compose restart grafana
+
+# Update images
+sudo docker-compose pull
+sudo docker-compose up -d
+
+# Backup data
+tar -czf loki-backup-$(date +%Y%m%d).tar.gz data/
+```
+
+### Agent Servers
+```bash
+# Restart services
+sudo systemctl restart promtail file-monitor
+
+# View logs
+sudo journalctl -u promtail -f
+sudo journalctl -u file-monitor -f
+
+# Check disk space for logs
+df -h /var/log/
+du -sh /var/log/audit/
+du -sh /var/log/file-changes/
+
+# Rotate logs (if needed)
+sudo logrotate -f /etc/logrotate.d/rsyslog
+```
+
+---
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Promtail can't connect to Loki:**
+   ```bash
+   # Check network connectivity
+   telnet YOUR_MONITORING_SERVER_IP 3100
+   
+   # Check firewall
+   sudo ufw status
+   ```
+
+2. **No SSH logs appearing:**
+   ```bash
+   # Check if SSH logs exist
+   sudo tail -f /var/log/auth.log
+   
+   # Verify SSH service is logging
+   sudo grep -i ssh /var/log/auth.log | tail -5
+   ```
+
+3. **File monitoring not working:**
+   ```bash
+   # Check inotify limits
+   cat /proc/sys/fs/inotify/max_user_watches
+   
+   # Increase if needed
+   echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf
+   sudo sysctl -p
+   ```
+
+4. **High disk usage:**
+   ```bash
+   # Check log sizes
+   du -sh /var/log/*
+   
+   # Configure log rotation
+   sudo nano /etc/logrotate.d/audit
+   ```
+
+5. **Can't see all servers in Grafana:**
+   ```bash
+   # Check which servers are reporting
+   curl -G -s "http://YOUR_LOKI_SERVER:3100/loki/api/v1/label/server/values" | jq
+   
+   # Check server-specific logs
+   curl -G -s "http://YOUR_LOKI_SERVER:3100/loki/api/v1/query" \
+     --data-urlencode 'query={server="192.168.1.100"}' | jq
+   ```
+
+### Log Locations
+- **SSH Logs:** `/var/log/auth.log` (Ubuntu/Debian), `/var/log/secure` (CentOS/RHEL)
+- **System Logs:** `/var/log/syslog`
+- **Audit Logs:** `/var/log/audit/audit.log`
+- **File Changes:** `/var/log/file-changes/changes.log`
+- **Promtail Logs:** `journalctl -u promtail`
+
+---
+
+## Security Considerations
+
+1. **Secure the monitoring server:**
+   ```bash
+   # Use strong passwords for Grafana
+   # Enable HTTPS/TLS for production
+   # Restrict access with firewall rules
+   ```
+
+2. **Protect sensitive logs:**
+   ```bash
+   # Set appropriate file permissions
+   sudo chmod 640 /var/log/audit/audit.log
+   sudo chown root:adm /var/log/audit/audit.log
+   ```
+
+3. **Network security:**
+   ```bash
+   # Use VPN or private networks
+   # Enable authentication in Loki for production
+   # Use TLS encryption for log shipping
+   ```
+
+4. **Loki Dashboard - Enter one of these popular Loki dashboard IDs:**
+   ```bash
+    # 13639 - Loki Dashboard Quick Search
+    # 12019 - Loki Logs Dashboard
+    # 14055 - Loki Stack Monitoring
+    # 15141 - Loki Operational Dashboard
+   ```
+
+This setup provides comprehensive monitoring of SSH activities and file changes across your infrastructure with centralized logging through Loki and visualization through Grafana. Each server will now be uniquely identified with proper labels for easy filtering and analysis.
