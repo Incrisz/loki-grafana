@@ -8,7 +8,7 @@ Complete setup guide for centralized log monitoring using Loki with Docker on th
 ```bash
 # Install Docker and Docker Compose
 sudo apt update
-sudo apt install -y docker.io docker-compose
+sudo apt install -y docker.io sudo docker-compose
 sudo systemctl enable docker
 sudo systemctl start docker
 sudo usermod -aG docker $USER
@@ -22,7 +22,7 @@ cd loki-monitoring
 
 ### 2. Create Docker Compose File
 ```bash
-tee docker-compose.yml > /dev/null <<'EOF'
+tee sudo docker-compose.yml > /dev/null <<'EOF'
 version: '3.8'
 
 services:
@@ -136,12 +136,12 @@ sudo chown -R 472:472 data/grafana
 sudo chmod -R 755 data/
 
 # Start services
-docker-compose up -d
+sudo docker-compose up -d
 
 # Check status
-docker-compose ps
-docker-compose logs loki
-docker-compose logs grafana
+sudo docker-compose ps
+sudo docker-compose logs loki
+sudo docker-compose logs grafana
 ```
 
 ### 6. Configure Firewall
@@ -399,7 +399,7 @@ sudo systemctl status auditd
 ### Central Server Verification
 ```bash
 # Check Docker containers
-docker-compose ps
+sudo docker-compose ps
 
 # Check Loki API
 curl -G -s "http://localhost:3100/ready"
@@ -484,16 +484,16 @@ echo "test content" | sudo tee /home/test-file.txt
 ### Central Server (Docker)
 ```bash
 # View logs
-docker-compose logs -f loki
-docker-compose logs -f grafana
+sudo docker-compose logs -f loki
+sudo docker-compose logs -f grafana
 
 # Restart services
-docker-compose restart loki
-docker-compose restart grafana
+sudo docker-compose restart loki
+sudo docker-compose restart grafana
 
 # Update images
-docker-compose pull
-docker-compose up -d
+sudo docker-compose pull
+sudo docker-compose up -d
 
 # Backup data
 tar -czf loki-backup-$(date +%Y%m%d).tar.gz data/
