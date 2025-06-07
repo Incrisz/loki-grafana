@@ -270,4 +270,4 @@ For questions or support, please open an issue in this repository.
 
 
 
-LOKI_SERVER_IP="13.40.87.15" SERVER_NAME="loki-pod" bash -c "$(curl -sSL https://raw.githubusercontent.com/Incrisz/loki-grafana/main/agent-loki-setup.sh)"
+LOKI_SERVER_IP="18.175.149.165" SERVER_NAME="loki-pod" bash -c "$(curl -sSL https://raw.githubusercontent.com/Incrisz/loki-grafana/main/agent-loki-setup.sh)"
