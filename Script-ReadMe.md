@@ -270,7 +270,7 @@ For questions or support, please open an issue in this repository.
 
 
 
-LOKI_SERVER_IP="18.171.169.64" SERVER_NAME="loki-pod" bash -c "$(curl -sSL https://raw.githubusercontent.com/Incrisz/loki-grafana/main/agent-loki-setup.sh)"
+LOKI_SERVER_IP="52.56.185.102" SERVER_NAME="loki-pod" bash -c "$(curl -sSL https://raw.githubusercontent.com/Incrisz/loki-grafana/main/agent-loki-setup.sh)"
 
 
 {server="loki-pod-18.171.169.64", job="system-logs"} |= `bash-history`
