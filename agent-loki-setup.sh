@@ -73,6 +73,14 @@ EOF
 sudo sed -i '/^name_format/d' /etc/audit/auditd.conf
 echo "name_format = hostname" | sudo tee -a /etc/audit/auditd.conf
 
+# Enable command history logging
+echo "📝 Configuring command history logging..."
+sudo tee -a /etc/bash.bashrc > /dev/null <<'EOF'
+
+# Log all commands to syslog
+export PROMPT_COMMAND='history -a; logger -p local6.notice -t bash-history "$(whoami) [$]: $(history 1 | sed "s/^[ ]*[0-9]\+[ ]*//")"'
+EOF
+
 # Get server identification
 echo "🏷️ Configuring server identification..."
 SERVER_IP=$(hostname -I | awk '{print $1}')
