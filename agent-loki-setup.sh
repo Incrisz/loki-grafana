@@ -138,6 +138,12 @@ if [ -n "$SERVER_NAME" ]; then
     sudo hostnamectl set-hostname "$NEW_HOSTNAME"
     HOSTNAME="$NEW_HOSTNAME"
     SERVER_IDENTIFIER="$NEW_HOSTNAME"
+    
+    # Restart logging services to pick up new hostname
+    echo "🔄 Restarting logging services for hostname change..."
+    sudo systemctl restart rsyslog
+    sudo systemctl restart systemd-journald
+    
     echo "✅ System hostname changed to: $NEW_HOSTNAME"
 elif [ -f "/etc/server-name" ]; then
     SERVER_IDENTIFIER=$(cat /etc/server-name)

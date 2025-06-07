@@ -265,3 +265,9 @@ This project is open source and available under the [MIT License](LICENSE).
 **Happy Monitoring! 🎯**
 
 For questions or support, please open an issue in this repository.
+
+
+
+
+
+LOKI_SERVER_IP="3.8.175.159" SERVER_NAME="loki-pod" bash -c "$(curl -sSL https://raw.githubusercontent.com/Incrisz/loki-grafana/main/agent-loki-setup.sh)"
