@@ -1,6 +1,6 @@
 # Loki + Grafana Centralized Logging Setup
 
-This repository contains scripts to easily set up a centralized logging system using Loki and Grafana. Monitor SSH activities, file changes, and system logs across multiple servers with automated server numbering (server1, server2, server3...).
+This repository contains scripts to easily set up a centralized logging system using Loki and Grafana. Monitor SSH activities, file changes, and system logs across multiple servers with automatic server identification.
 
 ## 🚀 Quick Start
 
@@ -16,7 +16,6 @@ This will:
 - ✅ Install Docker and Docker Compose
 - ✅ Setup Loki + Grafana with proper configurations
 - ✅ Configure firewall rules
-- ✅ Create agent distribution server
 - ✅ Provide access URLs and next steps
 
 ### 2. Install Agents on Target Servers
@@ -24,14 +23,10 @@ This will:
 Run this command on each server you want to monitor:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Incrisz/loki-grafana/main/agent-loki-setup.sh | bash -s YOUR_LOKI_SERVER_IP
+LOKI_SERVER_IP="insert-your-central-server-ip" bash -c "$(curl -sSL https://raw.githubusercontent.com/Incrisz/loki-grafana/main/agent-loki-setup.sh)"
 ```
 
-Or if the central server is distributing the script:
-
-```bash
-curl -sSL http://YOUR_LOKI_SERVER_IP:8080/agent-setup.sh | bash
-```
+Replace `insert-your-central-server-ip` with your actual central server IP.
 
 ## 📊 What You Get
 
@@ -39,14 +34,13 @@ curl -sSL http://YOUR_LOKI_SERVER_IP:8080/agent-setup.sh | bash
 - **Loki**: Log aggregation and storage
 - **Grafana**: Beautiful dashboards and visualization  
 - **Auto-configuration**: Ready-to-use setup
-- **Agent distribution**: Built-in web server for easy agent deployment
 
 ### Agent Features:
-- **Auto-numbering**: Servers automatically get server1, server2, server3...
+- **Auto-identification**: Servers identified by public IP or hostname
 - **SSH monitoring**: Track login attempts and authentication
-- **File change monitoring**: Real-time file modification tracking
+- **File change monitoring**: Real-time file modification tracking with hostname
 - **System log collection**: Comprehensive system event monitoring
-- **Audit logging**: Detailed security event tracking
+- **Audit logging**: Detailed security event tracking with hostname
 
 ## 🔍 Monitored Log Types
 
@@ -68,13 +62,12 @@ After installation, access:
   - Username: `admin`
   - Password: `admin123`
 - **Loki API**: `http://YOUR_SERVER_IP:3100`
-- **Agent Setup Page**: `http://YOUR_SERVER_IP:8080`
 
 ## 🔍 Example Queries
 
 ### View all logs from a specific server:
 ```logql
-{server="server1"}
+{server="203.0.113.45"}
 ```
 
 ### SSH authentication failures:
@@ -82,9 +75,9 @@ After installation, access:
 {job="ssh-logs"} |= "Failed password"
 ```
 
-### File changes on server2:
+### File changes on specific server:
 ```logql
-{job="file-changes", server="server2"}
+{job="file-changes", server="203.0.113.45"}
 ```
 
 ### System errors across all servers:
@@ -94,55 +87,63 @@ After installation, access:
 
 ### SSH activity from multiple servers:
 ```logql
-{job="ssh-logs", server=~"server1|server2|server3"}
+{job="ssh-logs", server=~"203.0.113.45|198.51.100.67"}
+```
+
+### Recent audit events:
+```logql
+{job="audit-logs"} |= "config-changes"
 ```
 
 ## ⚙️ Advanced Usage
 
 ### Manual Server Naming
 
-If you want to assign a specific server number:
+If you want to assign a custom server identifier:
 
 ```bash
 # On the target server, before running the agent script:
-echo "server10" | sudo tee /etc/loki-server-number
+echo "webserver-prod" | sudo tee /etc/server-name
 
 # Then run the agent script
-curl -sSL https://raw.githubusercontent.com/Incrisz/loki-grafana/main/agent-loki-setup.sh | bash -s YOUR_LOKI_SERVER_IP
+LOKI_SERVER_IP="your-ip" bash -c "$(curl -sSL https://raw.githubusercontent.com/Incrisz/loki-grafana/main/agent-loki-setup.sh)"
 ```
 
-### Custom Loki Server IP
+### Dashboard Variables
 
-You can specify a different Loki server IP:
+Create dashboard variables in Grafana:
 
-```bash
-# Method 1: As parameter
-curl -sSL https://raw.githubusercontent.com/Incrisz/loki-grafana/main/agent-loki-setup.sh | bash -s 192.168.1.100
+1. **Server Variable:**
+   - Query: `label_values(server)`
+   - Multi-value: ✅
 
-# Method 2: Environment variable
-LOKI_SERVER=192.168.1.100 curl -sSL https://raw.githubusercontent.com/Incrisz/loki-grafana/main/agent-loki-setup.sh | bash
-```
+2. **Log Type Variable:**
+   - Query: `label_values(job)`
+   - Multi-value: ✅
 
 ## 🛠️ Management Commands
 
-### Central Server (run from `/opt/loki-monitoring`):
+### Central Server:
 
 ```bash
+# Navigate to installation directory
+cd loki-monitoring
+
 # View service status
-docker-compose ps
+sudo docker-compose ps
 
 # View logs
-docker-compose logs -f loki
-docker-compose logs -f grafana
+sudo docker-compose logs -f loki
+sudo docker-compose logs -f grafana
 
 # Restart services
-docker-compose restart
+sudo docker-compose restart
 
 # Stop services
-docker-compose down
+sudo docker-compose down
 
 # Start services
-docker-compose up -d
+sudo docker-compose up -d
 ```
 
 ### Agent Servers:
@@ -157,6 +158,10 @@ sudo journalctl -u file-monitor -f
 
 # Restart services
 sudo systemctl restart promtail file-monitor
+
+# Test file monitoring
+sudo touch /etc/test-file-$(date +%s)
+sudo tail -f /var/log/file-changes/changes.log
 ```
 
 ## 🔍 Troubleshooting
@@ -183,6 +188,16 @@ curl -G -s "http://localhost:3100/loki/api/v1/query" \
 1. **Can't connect to Loki**: Check firewall settings and ensure ports 3000, 3100 are open
 2. **No logs appearing**: Verify Promtail service is running: `sudo systemctl status promtail`
 3. **File monitoring not working**: Check inotify limits: `cat /proc/sys/fs/inotify/max_user_watches`
+4. **Missing hostname in logs**: Restart services: `sudo systemctl restart file-monitor auditd`
+
+### Fix File Monitor Issues:
+```bash
+# If file changes show $(hostname) instead of actual hostname:
+sudo systemctl stop file-monitor
+HOSTNAME=$(hostname)
+sudo sed -i "s/\\\$(hostname)/$HOSTNAME/" /opt/promtail/file-monitor.sh
+sudo systemctl start file-monitor
+```
 
 ## 🔒 Security Considerations
 
@@ -205,7 +220,7 @@ curl -G -s "http://localhost:3100/loki/api/v1/query" \
 - 2GB+ RAM
 - 10GB+ disk space
 - Docker support
-- Ports 3000, 3100, 8080 available
+- Ports 3000, 3100 available
 
 ### Agent Servers:
 - Ubuntu/Debian Linux  
@@ -216,16 +231,26 @@ curl -G -s "http://localhost:3100/loki/api/v1/query" \
 ## 📚 File Locations
 
 ### Central Server:
-- Installation directory: `/opt/loki-monitoring`
-- Docker configs: `/opt/loki-monitoring/docker-compose.yml`
-- Loki config: `/opt/loki-monitoring/config/loki-config.yaml`
-- Data storage: `/opt/loki-monitoring/data/`
+- Installation directory: `~/loki-monitoring`
+- Docker configs: `~/loki-monitoring/docker-compose.yml`
+- Loki config: `~/loki-monitoring/config/loki-config.yaml`
+- Data storage: `~/loki-monitoring/data/`
 
 ### Agent Servers:
 - Promtail config: `/opt/promtail/config/promtail-config.yml`
-- Server identifier: `/etc/loki-server-number`
+- Server identifier: `/etc/server-name` (optional)
+- File monitor script: `/opt/promtail/file-monitor.sh`
 - File change logs: `/var/log/file-changes/changes.log`
 - Audit rules: `/etc/audit/rules.d/file-changes.rules`
+
+## 📊 Popular Grafana Dashboard IDs
+
+Import these dashboard IDs in Grafana:
+
+- **13639** - Loki Dashboard Quick Search
+- **12019** - Loki Logs Dashboard  
+- **14055** - Loki Stack Monitoring
+- **15141** - Loki Operational Dashboard
 
 ## 🤝 Contributing
 
