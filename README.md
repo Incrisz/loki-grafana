@@ -213,14 +213,21 @@ sudo tee /etc/audit/rules.d/file-changes.rules > /dev/null <<'EOF'
 -w /etc/sudoers -p wa -k sudo-changes
 EOF
 
+# Configure auditd to include hostname in logs
+sudo sed -i '/^name_format/d' /etc/audit/auditd.conf
+echo "name_format = hostname" | sudo tee -a /etc/audit/auditd.conf
+
 # Restart auditd
 sudo systemctl restart auditd
 sudo systemctl enable auditd
 ```
 
-#### Create File Change Logger Script (Improved)
+#### Create File Change Logger Script (Corrected)
 ```bash
-sudo tee /opt/promtail/file-monitor.sh > /dev/null <<'EOF'
+# Get hostname for embedding in script
+HOSTNAME=$(hostname)
+
+sudo tee /opt/promtail/file-monitor.sh > /dev/null <<EOF
 #!/bin/bash
 
 LOG_FILE="/var/log/file-changes/changes.log"
@@ -235,12 +242,12 @@ DIRS_TO_MONITOR=("/etc" "/home" "/usr/local" "/root")
 
 # Check which directories exist
 EXISTING_DIRS=()
-for dir in "${DIRS_TO_MONITOR[@]}"; do
-    if [ -d "$dir" ]; then
-        EXISTING_DIRS+=("$dir")
-        echo "$(date) - Will monitor: $dir" >> "$ERROR_LOG"
+for dir in "\${DIRS_TO_MONITOR[@]}"; do
+    if [ -d "\$dir" ]; then
+        EXISTING_DIRS+=("\$dir")
+        echo "\$(date) - Will monitor: \$dir" >> "\$ERROR_LOG"
     else
-        echo "$(date) - Skipping non-existent directory: $dir" >> "$ERROR_LOG"
+        echo "\$(date) - Skipping non-existent directory: \$dir" >> "\$ERROR_LOG"
     fi
 done
 
@@ -250,23 +257,23 @@ if command -v nginx >/dev/null 2>&1 || command -v apache2 >/dev/null 2>&1; then
     EXISTING_DIRS+=("/var/www")
 fi
 
-echo "$(date) - Starting file monitoring for: ${EXISTING_DIRS[*]}" >> "$ERROR_LOG"
-echo "$(date) - EXCLUDING: /opt/promtail, cache dirs, temp dirs" >> "$ERROR_LOG"
+echo "\$(date) - Starting file monitoring for: \${EXISTING_DIRS[*]}" >> "\$ERROR_LOG"
+echo "\$(date) - EXCLUDING: /opt/promtail, cache dirs, temp dirs" >> "\$ERROR_LOG"
 
-# Start inotify with comprehensive exclusions
-inotifywait -m -r -e modify,create,delete,move \
-    "${EXISTING_DIRS[@]}" \
-    --format '%T [%w%f] %e' \
-    --timefmt '%Y-%m-%d %H:%M:%S' \
-    --exclude '/(\.(cache|local/share/Trash|git|svn)|tmp|temp|promtail)/' \
-    >> "$LOG_FILE" 2>> "$ERROR_LOG" &
+# Start inotify with comprehensive exclusions (hostname embedded)
+inotifywait -m -r -e modify,create,delete,move \\
+    "\${EXISTING_DIRS[@]}" \\
+    --format "%T $HOSTNAME [%w%f] %e" \\
+    --timefmt '%Y-%m-%d %H:%M:%S' \\
+    --exclude '/(\.(cache|local/share/Trash|git|svn)|tmp|temp|promtail)/' \\
+    >> "\$LOG_FILE" 2>> "\$ERROR_LOG" &
 
-INOTIFY_PID=$!
-echo $INOTIFY_PID > "$PID_FILE"
-echo "$(date) - File monitoring started. PID: $INOTIFY_PID" >> "$ERROR_LOG"
+INOTIFY_PID=\$!
+echo \$INOTIFY_PID > "\$PID_FILE"
+echo "\$(date) - File monitoring started. PID: \$INOTIFY_PID" >> "\$ERROR_LOG"
 
 # Wait for the process
-wait $INOTIFY_PID
+wait \$INOTIFY_PID
 EOF
 
 sudo chmod +x /opt/promtail/file-monitor.sh
