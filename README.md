@@ -351,7 +351,7 @@ scrape_configs:
           server: ${SERVER_IDENTIFIER}
           hostname: ${HOSTNAME}
           private_ip: ${SERVER_IP}
-          public_ip: ${PUBLIC_IP}
+          server_ip: ${PUBLIC_IP}
           __path__: /var/log/audit/audit.log
 
   # Custom File Change Logs
@@ -364,7 +364,7 @@ scrape_configs:
           server: ${SERVER_IDENTIFIER}
           hostname: ${HOSTNAME}
           private_ip: ${SERVER_IP}
-          public_ip: ${PUBLIC_IP}
+          server_ip: ${PUBLIC_IP}
           __path__: /var/log/file-changes/changes.log
 
   # Kernel Logs
