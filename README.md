@@ -162,6 +162,19 @@ sudo ufw reload
 
 ## Agent Server Setup (Native Installation)
 
+### Quick Setup Script
+Use this one-liner for agent installation:
+
+```bash
+# Basic setup (auto-detects server name)
+LOKI_SERVER_IP="your-central-server-ip" bash -c "$(curl -sSL https://raw.githubusercontent.com/Incrisz/loki-grafana/main/agent-loki-setup.sh)"
+
+# With custom server name (changes hostname to servername-ip)
+LOKI_SERVER_IP="192.168.1.100" SERVER_NAME="webserver-prod" bash -c "$(curl -sSL https://raw.githubusercontent.com/Incrisz/loki-grafana/main/agent-loki-setup.sh)"
+```
+
+### Manual Installation Steps
+
 ### 1. Install Dependencies
 ```bash
 # Update system
@@ -183,6 +196,7 @@ sudo chmod +x /usr/local/bin/promtail
 # Create directories
 sudo mkdir -p /opt/promtail/{config,data}
 sudo mkdir -p /var/log/file-changes
+sudo mkdir -p /var/log/commands
 ```
 
 ### 3. Setup File Change Monitoring
@@ -216,15 +230,30 @@ EOF
 # Configure auditd to include hostname in logs
 sudo sed -i '/^name_format/d' /etc/audit/auditd.conf
 echo "name_format = hostname" | sudo tee -a /etc/audit/auditd.conf
-
-# Restart auditd
-sudo systemctl restart auditd
-sudo systemctl enable auditd
 ```
 
-#### Create File Change Logger Script (Corrected)
+#### Setup Command History Logging
 ```bash
-# Get hostname for embedding in script
+# Enable command history logging to dedicated file
+sudo tee -a /etc/bash.bashrc > /dev/null <<'EOF'
+
+# Log all commands to dedicated file
+export PROMPT_COMMAND='history -a; echo "$(date "+%Y-%m-%d %H:%M:%S") $(hostname) $(whoami) [$$]: $(history 1 | sed "s/^[ ]*[0-9]\+[ ]*//")" >> /var/log/commands/bash-history.log'
+EOF
+```
+
+#### Set Hostname (Optional)
+```bash
+# If using SERVER_NAME variable, change hostname
+if [ -n "$SERVER_NAME" ] && [ -n "$LOKI_SERVER_IP" ]; then
+    NEW_HOSTNAME="${SERVER_NAME}-${LOKI_SERVER_IP}"
+    sudo hostnamectl set-hostname "$NEW_HOSTNAME"
+    sudo systemctl restart rsyslog systemd-journald
+fi
+```
+
+#### Create File Change Logger Script
+```bash
 HOSTNAME=$(hostname)
 
 sudo tee /opt/promtail/file-monitor.sh > /dev/null <<EOF
@@ -237,7 +266,7 @@ PID_FILE="/var/run/file-monitor.pid"
 # Create log directory
 mkdir -p /var/log/file-changes
 
-# List of directories to monitor (excluding /opt to avoid promtail noise)
+# List of directories to monitor
 DIRS_TO_MONITOR=("/etc" "/home" "/usr/local" "/root")
 
 # Check which directories exist
@@ -258,9 +287,8 @@ if command -v nginx >/dev/null 2>&1 || command -v apache2 >/dev/null 2>&1; then
 fi
 
 echo "\$(date) - Starting file monitoring for: \${EXISTING_DIRS[*]}" >> "\$ERROR_LOG"
-echo "\$(date) - EXCLUDING: /opt/promtail, cache dirs, temp dirs" >> "\$ERROR_LOG"
 
-# Start inotify with comprehensive exclusions (hostname embedded)
+# Start inotify with hostname embedded
 inotifywait -m -r -e modify,create,delete,move \\
     "\${EXISTING_DIRS[@]}" \\
     --format "%T $HOSTNAME [%w%f] %e" \\
@@ -272,21 +300,20 @@ INOTIFY_PID=\$!
 echo \$INOTIFY_PID > "\$PID_FILE"
 echo "\$(date) - File monitoring started. PID: \$INOTIFY_PID" >> "\$ERROR_LOG"
 
-# Wait for the process
 wait \$INOTIFY_PID
 EOF
 
 sudo chmod +x /opt/promtail/file-monitor.sh
 ```
 
-### 4. Create Promtail Configuration (Simple Version)
+### 4. Create Promtail Configuration
 **Replace `YOUR_MONITORING_SERVER_IP` with your actual monitoring server IP:**
 
 ```bash
 # Set your monitoring server IP
 LOKI_SERVER_IP="YOUR_MONITORING_SERVER_IP"
 
-# Get server identification - uses hostname or you can manually set SERVER_NAME
+# Get server identification
 HOSTNAME=$(hostname)
 SERVER_IP=$(hostname -I | awk '{print $1}')
 PUBLIC_IP=$(curl -s ipinfo.io/ip 2>/dev/null || echo "unknown")
@@ -386,26 +413,22 @@ scrape_configs:
           private_ip: ${SERVER_IP}
           public_ip: ${PUBLIC_IP}
           __path__: /var/log/kern.log
+
+  # Command History Logs
+  - job_name: cmd-logs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: cmd-logs
+          server: ${SERVER_IDENTIFIER}
+          hostname: ${HOSTNAME}
+          private_ip: ${SERVER_IP}
+          public_ip: ${PUBLIC_IP}
+          __path__: /var/log/commands/bash-history.log
 EOF
 
 echo "✅ Promtail configured for server: $SERVER_IDENTIFIER"
-```
-
-### Alternative: Manual Server Naming
-If you prefer to manually name your servers (server1, server2, etc.), create this override:
-
-```bash
-# OPTIONAL: Manual server naming
-# Create this file on each server with a unique name:
-# echo "server1" | sudo tee /etc/server-name
-# echo "server2" | sudo tee /etc/server-name  
-# echo "server3" | sudo tee /etc/server-name
-
-# Check for manual server name override
-if [ -f "/etc/server-name" ]; then
-    SERVER_IDENTIFIER=$(cat /etc/server-name)
-    echo "✅ Using manual server name: $SERVER_IDENTIFIER"
-fi
 ```
 
 ### 5. Create Systemd Services
@@ -458,6 +481,9 @@ EOF
 # Reload systemd
 sudo systemctl daemon-reload
 
+# Restart auditd
+sudo systemctl restart auditd
+
 # Enable and start services
 sudo systemctl enable promtail file-monitor
 sudo systemctl start promtail file-monitor
@@ -480,11 +506,8 @@ sudo docker-compose ps
 # Check Loki API
 curl -G -s "http://localhost:3100/ready"
 
-# Check if logs are being received
-curl -G -s "http://localhost:3100/loki/api/v1/labels"
-
 # Check which servers are sending logs
-curl -G -s "http://localhost:3100/loki/api/v1/label/instance/values" | jq
+curl -G -s "http://localhost:3100/loki/api/v1/label/server/values" | jq
 
 # View recent logs
 curl -G -s "http://localhost:3100/loki/api/v1/query" \
@@ -502,28 +525,14 @@ sudo journalctl -u promtail -f --no-pager
 sudo systemctl status file-monitor
 ls -la /var/log/file-changes/
 
-# Test SSH logging (generate some SSH activity)
-ssh localhost
-sudo tail -f /var/log/auth.log
+# Test command logging (logout/login required for new sessions)
+exit
+# ssh back in, then:
+sudo tail -f /var/log/commands/bash-history.log
 
-# Test file changes (create a test file)
+# Test file changes
 sudo touch /etc/test-file
-sudo ausearch -k config-changes | tail -5
-
-# Check audit logs
-sudo ausearch -ts recent | head -10
-```
-
-### Test Log Generation
-```bash
-# Generate SSH test logs
-ssh-keygen -t rsa -f /tmp/test_key -N ""
-ssh -i /tmp/test_key localhost
-
-# Generate file change logs
-sudo touch /etc/test-config-change
-sudo mkdir /home/test-directory
-echo "test content" | sudo tee /home/test-file.txt
+sudo tail -f /var/log/file-changes/changes.log
 ```
 
 ---
@@ -535,36 +544,41 @@ echo "test content" | sudo tee /home/test-file.txt
 - Username: `admin`
 - Password: `admin123`
 
-### Simple Multi-Server Queries
+### LogQL Queries
 
 1. **SSH Failed Logins by Server:**
    ```
    {job="ssh-logs"} |= "Failed password"
    ```
 
-2. **Successful SSH Logins from Specific Server:**
+2. **Command History from Specific Server:**
    ```
-   {job="ssh-logs", server="192.168.1.100"} |= "Accepted password"
-   ```
-
-3. **File Changes on Specific Server:**
-   ```
-   {job="file-changes", server="192.168.1.100"}
+   {job="cmd-logs", server="192.168.1.100"}
    ```
 
-4. **System Errors Across All Servers:**
+3. **File Changes with Specific Action:**
    ```
-   {job="system-logs"} |= "error" or "Error" or "ERROR"
-   ```
-
-5. **All Activity from Specific Server:**
-   ```
-   {server="192.168.1.100"}
+   {job="file-changes"} |= "DELETE"
    ```
 
-6. **SSH Activity from Multiple Servers:**
+4. **All Commands Containing 'sudo':**
+   ```
+   {job="cmd-logs"} |= "sudo"
+   ```
+
+5. **SSH Activity from Multiple Servers:**
    ```
    {job="ssh-logs", server=~"192.168.1.100|192.168.1.101"}
+   ```
+
+6. **File Changes in /etc Directory:**
+   ```
+   {job="file-changes"} |= "/etc"
+   ```
+
+7. **All Activity from Custom Named Server:**
+   ```
+   {server=~"webserver-prod.*"}
    ```
 
 ### Create Dashboard Variables
@@ -575,6 +589,13 @@ echo "test content" | sudo tee /home/test-file.txt
 2. **Log Type Variable:**
    - Query: `label_values(job)`
    - Multi-value: ✅
+
+### Popular Dashboard IDs
+Import these dashboard IDs in Grafana:
+- **13639** - Loki Dashboard Quick Search
+- **12019** - Loki Logs Dashboard  
+- **14055** - Loki Stack Monitoring
+- **15141** - Loki Operational Dashboard
 
 ---
 
@@ -607,13 +628,14 @@ sudo systemctl restart promtail file-monitor
 sudo journalctl -u promtail -f
 sudo journalctl -u file-monitor -f
 
-# Check disk space for logs
-df -h /var/log/
-du -sh /var/log/audit/
-du -sh /var/log/file-changes/
+# Check command logging (users must logout/login)
+sudo tail -f /var/log/commands/bash-history.log
 
-# Rotate logs (if needed)
-sudo logrotate -f /etc/logrotate.d/rsyslog
+# Fix file monitor hostname issues
+sudo systemctl stop file-monitor
+HOSTNAME=$(hostname)
+sudo sed -i "s/ip-172-31-[0-9-]\\+/$HOSTNAME/" /opt/promtail/file-monitor.sh
+sudo systemctl start file-monitor
 ```
 
 ---
@@ -622,7 +644,27 @@ sudo logrotate -f /etc/logrotate.d/rsyslog
 
 ### Common Issues
 
-1. **Promtail can't connect to Loki:**
+1. **No command logs appearing:**
+   ```bash
+   # Users must logout and login for command logging to work
+   # Check if file exists and has content
+   sudo ls -la /var/log/commands/
+   sudo tail -f /var/log/commands/bash-history.log
+   ```
+
+2. **File changes show old hostname:**
+   ```bash
+   # Restart file monitor after hostname change
+   sudo systemctl restart file-monitor
+   ```
+
+3. **Kernel logs inconsistent hostname:**
+   ```bash
+   # Normal behavior - requires reboot for full consistency
+   sudo reboot
+   ```
+
+4. **Promtail can't connect to Loki:**
    ```bash
    # Check network connectivity
    telnet YOUR_MONITORING_SERVER_IP 3100
@@ -631,49 +673,12 @@ sudo logrotate -f /etc/logrotate.d/rsyslog
    sudo ufw status
    ```
 
-2. **No SSH logs appearing:**
-   ```bash
-   # Check if SSH logs exist
-   sudo tail -f /var/log/auth.log
-   
-   # Verify SSH service is logging
-   sudo grep -i ssh /var/log/auth.log | tail -5
-   ```
-
-3. **File monitoring not working:**
-   ```bash
-   # Check inotify limits
-   cat /proc/sys/fs/inotify/max_user_watches
-   
-   # Increase if needed
-   echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf
-   sudo sysctl -p
-   ```
-
-4. **High disk usage:**
-   ```bash
-   # Check log sizes
-   du -sh /var/log/*
-   
-   # Configure log rotation
-   sudo nano /etc/logrotate.d/audit
-   ```
-
-5. **Can't see all servers in Grafana:**
-   ```bash
-   # Check which servers are reporting
-   curl -G -s "http://YOUR_LOKI_SERVER:3100/loki/api/v1/label/server/values" | jq
-   
-   # Check server-specific logs
-   curl -G -s "http://YOUR_LOKI_SERVER:3100/loki/api/v1/query" \
-     --data-urlencode 'query={server="192.168.1.100"}' | jq
-   ```
-
 ### Log Locations
-- **SSH Logs:** `/var/log/auth.log` (Ubuntu/Debian), `/var/log/secure` (CentOS/RHEL)
+- **SSH Logs:** `/var/log/auth.log`
 - **System Logs:** `/var/log/syslog`
 - **Audit Logs:** `/var/log/audit/audit.log`
 - **File Changes:** `/var/log/file-changes/changes.log`
+- **Command History:** `/var/log/commands/bash-history.log`
 - **Promtail Logs:** `journalctl -u promtail`
 
 ---
@@ -682,31 +687,16 @@ sudo logrotate -f /etc/logrotate.d/rsyslog
 
 1. **Secure the monitoring server:**
    ```bash
-   # Use strong passwords for Grafana
+   # Change default Grafana password
    # Enable HTTPS/TLS for production
    # Restrict access with firewall rules
    ```
 
-2. **Protect sensitive logs:**
-   ```bash
-   # Set appropriate file permissions
-   sudo chmod 640 /var/log/audit/audit.log
-   sudo chown root:adm /var/log/audit/audit.log
-   ```
-
-3. **Network security:**
+2. **Network security:**
    ```bash
    # Use VPN or private networks
    # Enable authentication in Loki for production
    # Use TLS encryption for log shipping
    ```
 
-4. **Loki Dashboard - Enter one of these popular Loki dashboard IDs:**
-   ```bash
-    # 13639 - Loki Dashboard Quick Search
-    # 12019 - Loki Logs Dashboard
-    # 14055 - Loki Stack Monitoring
-    # 15141 - Loki Operational Dashboard
-   ```
-
-This setup provides comprehensive monitoring of SSH activities and file changes across your infrastructure with centralized logging through Loki and visualization through Grafana. Each server will now be uniquely identified with proper labels for easy filtering and analysis.
+This setup provides comprehensive monitoring including command history tracking across your infrastructure with centralized logging through Loki and visualization through Grafana.
