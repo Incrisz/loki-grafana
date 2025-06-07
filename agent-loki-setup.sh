@@ -166,39 +166,6 @@ EOF
 
 sudo chmod +x /opt/promtail/file-monitor.sh
 
-# Get server identification
-echo "🏷️ Configuring server identification..."
-SERVER_IP=$(hostname -I | awk '{print $1}')
-PUBLIC_IP=$(curl -s ipinfo.io/ip 2>/dev/null || echo "unknown")
-
-# Change system hostname if SERVER_NAME is provided
-if [ -n "$SERVER_NAME" ]; then
-    NEW_HOSTNAME="${SERVER_NAME}-${LOKI_SERVER_IP}"
-    echo "🔧 Setting system hostname to: $NEW_HOSTNAME"
-    sudo hostnamectl set-hostname "$NEW_HOSTNAME"
-    HOSTNAME="$NEW_HOSTNAME"
-    SERVER_IDENTIFIER="$NEW_HOSTNAME"
-    
-    # Restart logging services to pick up new hostname
-    echo "🔄 Restarting logging services for hostname change..."
-    sudo systemctl restart rsyslog
-    sudo systemctl restart systemd-journald
-    
-    echo "✅ System hostname changed to: $NEW_HOSTNAME"
-    echo "⚠️  Note: Kernel logs will show old hostname until system reboot"
-    echo "    Run 'sudo reboot' after setup to update all logs"
-elif [ -f "/etc/server-name" ]; then
-    SERVER_IDENTIFIER=$(cat /etc/server-name)
-    echo "✅ Using manual server name: $SERVER_IDENTIFIER"
-else
-    # Use public IP as identifier, fallback to hostname
-    SERVER_IDENTIFIER="${PUBLIC_IP}"
-    if [ "$PUBLIC_IP" = "unknown" ]; then
-        SERVER_IDENTIFIER="${HOSTNAME}"
-    fi
-    echo "✅ Using auto-detected identifier: $SERVER_IDENTIFIER"
-fi
-
 # Create Promtail configuration
 echo "⚙️ Creating Promtail configuration..."
 sudo tee /opt/promtail/config/promtail-config.yml > /dev/null <<EOF
@@ -290,6 +257,19 @@ scrape_configs:
           private_ip: ${SERVER_IP}
           public_ip: ${PUBLIC_IP}
           __path__: /var/log/kern.log
+
+  # Command History Logs
+  - job_name: cmd-logs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: cmd-logs
+          server: ${SERVER_IDENTIFIER}
+          hostname: ${HOSTNAME}
+          private_ip: ${SERVER_IP}
+          public_ip: ${PUBLIC_IP}
+          __path__: /var/log/commands/bash-history.log
 EOF
 
 # Create systemd services
