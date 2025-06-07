@@ -131,16 +131,24 @@ echo "🏷️ Configuring server identification..."
 SERVER_IP=$(hostname -I | awk '{print $1}')
 PUBLIC_IP=$(curl -s ipinfo.io/ip 2>/dev/null || echo "unknown")
 
-# Use public IP as identifier, fallback to hostname
-SERVER_IDENTIFIER="${PUBLIC_IP}"
-if [ "$PUBLIC_IP" = "unknown" ]; then
-    SERVER_IDENTIFIER="${HOSTNAME}"
-fi
-
-# Check for manual server name override
-if [ -f "/etc/server-name" ]; then
+# Change system hostname if SERVER_NAME is provided
+if [ -n "$SERVER_NAME" ]; then
+    NEW_HOSTNAME="${SERVER_NAME}-${LOKI_SERVER_IP}"
+    echo "🔧 Setting system hostname to: $NEW_HOSTNAME"
+    sudo hostnamectl set-hostname "$NEW_HOSTNAME"
+    HOSTNAME="$NEW_HOSTNAME"
+    SERVER_IDENTIFIER="$NEW_HOSTNAME"
+    echo "✅ System hostname changed to: $NEW_HOSTNAME"
+elif [ -f "/etc/server-name" ]; then
     SERVER_IDENTIFIER=$(cat /etc/server-name)
     echo "✅ Using manual server name: $SERVER_IDENTIFIER"
+else
+    # Use public IP as identifier, fallback to hostname
+    SERVER_IDENTIFIER="${PUBLIC_IP}"
+    if [ "$PUBLIC_IP" = "unknown" ]; then
+        SERVER_IDENTIFIER="${HOSTNAME}"
+    fi
+    echo "✅ Using auto-detected identifier: $SERVER_IDENTIFIER"
 fi
 
 # Create Promtail configuration

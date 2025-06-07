@@ -23,7 +23,7 @@ This will:
 Run this command on each server you want to monitor:
 
 ```bash
-LOKI_SERVER_IP="insert-your-central-server-ip" bash -c "$(curl -sSL https://raw.githubusercontent.com/Incrisz/loki-grafana/main/agent-loki-setup.sh)"
+LOKI_SERVER_IP="your-ip" SERVER_NAME="webserver-prod" bash -c "$(curl -sSL https://raw.githubusercontent.com/Incrisz/loki-grafana/main/agent-loki-setup.sh)"
 ```
 
 Replace `insert-your-central-server-ip` with your actual central server IP.
